@@ -1,6 +1,8 @@
 import io
-import warnings
+import json
+from openai import OpenAI
 
+import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -87,6 +89,81 @@ def make_demo_data(n_rows: int = 720) -> pd.DataFrame:
         }
     )
 
+def generate_gpt56_interpretation(
+    research_goal: str,
+    task_type: str,
+    n_samples: int,
+    n_features: int,
+    selected_features: list[str],
+    complexity: str,
+    validation_strategy: str,
+    baseline_name: str,
+    baseline_metrics: dict,
+    forest_metrics: dict,
+    importance_df: pd.DataFrame,
+    shap_importance: pd.Series,
+) -> str:
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "OPENAI_API_KEY is not configured. "
+            "Add it as a Codespaces or Streamlit secret."
+        )
+
+    client = OpenAI()
+
+    top_permutation = (
+        importance_df.head(5)[["Feature", "Importance"]]
+        .round(4)
+        .to_dict(orient="records")
+    )
+
+    top_shap = [
+        {
+            "feature": str(feature),
+            "mean_absolute_shap": round(float(value), 4),
+        }
+        for feature, value in shap_importance.head(5).items()
+    ]
+
+    analysis_summary = {
+        "research_goal": research_goal,
+        "task_type": task_type,
+        "samples": n_samples,
+        "available_numeric_features": n_features,
+        "selected_features": selected_features,
+        "suggested_complexity": complexity,
+        "validation_strategy": validation_strategy,
+        "transparent_baseline": baseline_name,
+        "baseline_metrics": baseline_metrics,
+        "random_forest_metrics": forest_metrics,
+        "top_permutation_importance": top_permutation,
+        "top_shap_contributions": top_shap,
+    }
+
+    response = client.responses.create(
+        model="gpt-5.6",
+        reasoning={"effort": "low"},
+        instructions=(
+            "You are the educational interpretation engine for WISE, "
+            "Workflow for Interpretable Scientific Evaluation. "
+            "Explain model-selection results for students and scientists. "
+            "Base every conclusion only on the supplied analysis summary. "
+            "Do not invent results. Do not treat feature importance, "
+            "correlation, or SHAP as causal evidence. "
+            "Prefer the simpler model unless additional complexity produces "
+            "a meaningful and scientifically defensible improvement. "
+            "Use concise Markdown with these headings: "
+            "Recommended Model, Why, Validation Note, Interpretation, "
+            "Limitations, and Next Step. Keep the response under 250 words."
+        ),
+        input=json.dumps(
+            analysis_summary,
+            ensure_ascii=False,
+            default=str,
+        ),
+    )
+
+    return response.output_text
 
 def infer_task_type(y: pd.Series) -> str:
     non_missing = y.dropna()
@@ -1435,6 +1512,49 @@ with tabs[5]:
         "Use permutation importance and SHAP for predictive interpretation.",
         "Treat model explanations as associations unless a causal design is used.",
     ]
+    
+    st.subheader("GPT-5.6 Scientific Interpretation")
+
+    st.caption(
+        "GPT-5.6 receives only summarized diagnostics and model results, "
+        "not the complete uploaded dataset."
+    )
+
+    if st.button(
+        "Generate GPT-5.6 interpretation",
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner(
+                "GPT-5.6 is translating the model diagnostics "
+                "into scientific guidance..."
+            ):
+                gpt56_interpretation = generate_gpt56_interpretation(
+                    research_goal=research_goal,
+                    task_type=task_type,
+                    n_samples=n_samples,
+                    n_features=n_features_total,
+                    selected_features=selected_features,
+                    complexity=complexity,
+                    validation_strategy=validation_strategy,
+                    baseline_name=baseline_name,
+                    baseline_metrics=results["baseline_metrics"],
+                    forest_metrics=results["forest_metrics"],
+                    importance_df=results["importance"],
+                    shap_importance=shap_importance,
+                )
+
+                st.session_state["gpt56_interpretation"] = (
+                    gpt56_interpretation
+                )
+
+        except Exception as exc:
+            st.error(f"GPT-5.6 interpretation failed: {exc}")
+
+    if st.session_state.get("gpt56_interpretation"):
+        st.markdown(st.session_state["gpt56_interpretation"])
+        st.success("Interpretation generated with GPT-5.6.")
+        
     for index, item in enumerate(workflow, start=1):
         st.markdown(f"{index}. {item}")
 
